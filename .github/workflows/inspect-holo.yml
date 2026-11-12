@@ -1,0 +1,444 @@
+name: holo-textura
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "tools/inject_holo.py"
+      - ".github/workflows/inspect-holo.yml"
+
+jobs:
+  holo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Dependencias
+        run: |
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet cryptography UnityPy pillow
+
+      - name: Descifrar
+        env:
+          P3105: "Levi-externas-veex-6393*#%"
+        run: |
+          mkdir -p work
+          python tools/decrypt3105.py "patches/holo_personaje.3105" work
+          ls -l work/blobs
+
+      - name: Volcar payload
+        run: |
+          python - <<'EOF'
+          import plistlib
+
+          pl = plistlib.loads(open("work/payload.bplist", "rb").read())
+
+          def walk(n, p):
+              if isinstance(n, dict):
+                  for k, v in n.items():
+                      walk(v, p + "." + k)
+              elif isinstance(n, list):
+                  print(p, "lista", len(n))
+                  for i, v in enumerate(n):
+                      walk(v, p + "[%d]" % i)
+              elif isinstance(n, (bytes, bytearray)):
+                  print(p, "bytes", len(n), n[:6].hex())
+              else:
+                  print(p, repr(n), type(n).__name__)
+
+          walk(pl, "root")
+          print("digests:", list((pl.get("replacementDigests") or {}).keys()))
+          EOF
+
+      - name: Recortar
+        run: |
+          python - <<'EOF'
+          import glob, os
+          from io import BytesIO
+          import UnityPy
+          from UnityPy.streams import EndianBinaryReader
+
+          src = max(glob.glob("work/blobs/*.bin"), key=os.path.getsize)
+          b = open(src, "rb").read()
+          b = b[b.find(b"UnityFS"):]
+
+          r = EndianBinaryReader(BytesIO(b), endian=">")
+          r.read_string_to_null()
+          r.read_u_int()
+          r.read_string_to_null()
+          r.read_string_to_null()
+          size = r.read_long()
+          r.read_u_int(); r.read_u_int()
+          flags = r.read_u_int()
+          pos = r.Position
+          print("size", size, "pos", pos, "len", len(b), "flags", hex(flags))
+
+          def ok(cut):
+              if cut <= 0 or cut > len(b):
+                  return None
+              try:
+                  env = UnityPy.load(bytes(b[:cut]))
+                  objs = list(env.objects)
+              except Exception:
+                  return None
+              if any(o.type.name == "Material" for o in objs):
+                  return len(objs)
+              return None
+
+          cands = [pos + size, size, pos + size + 8, len(b)]
+          cands += [len(b) - k for k in range(1, 9000)]
+          for cut in cands:
+              k = ok(cut)
+              if k:
+                  open("work/holo.bundle", "wb").write(bytes(b[:cut]))
+                  print("VALIDO cut", cut, "objetos", k)
+                  break
+          else:
+              raise SystemExit("ningun corte valido")
+          EOF
+
+      - name: Inyectar
+        run: |
+          python - <<'PY'
+          import copy, glob, traceback
+          import UnityPy
+          from UnityPy.enums import ClassIDType
+          from UnityPy.files import ObjectReader
+          from UnityPy.helpers import TypeTreeHelper
+          from UnityPy.helpers.Tpk import get_typetree_node
+          from UnityPy.streams import EndianBinaryWriter
+          from PIL import Image, ImageDraw, ImageFont
+
+          REP = "report.txt"
+          SRC = glob.glob("work/holo.bundle")[0]
+          OUT = "work/holo_new.bundle"
+
+          def log(*a):
+              s = " ".join(str(x) for x in a)
+              print(s)
+              with open(REP, "a", encoding="utf-8") as f:
+                  f.write(s + "\n")
+
+          def tree_of(o):
+              t = o.read_typetree()
+              if isinstance(t, tuple):
+                  t = t[0]
+              return t if isinstance(t, dict) else None
+
+          def build_tex(size=512):
+              img = Image.new("RGBA", (size, size), (0, 0, 0, 255))
+              d = ImageDraw.Draw(img)
+              font = ImageFont.truetype("DejaVuSans-Bold.ttf", 96)
+              step, row, y = 175, 0, -14
+              while y < size + step:
+                  x = -50 + (0 if row % 2 == 0 else 88)
+                  while x < size + step:
+                      d.text((x, y), "LEVI", font=font, fill=(255, 0, 0, 255))
+                      x += step
+                  y += 120
+                  row += 1
+              d.rectangle([0, 0, size - 1, size - 1], outline=(255, 255, 255, 255), width=5)
+              d.rectangle([5, 5, size - 6, size - 6], outline=(255, 255, 255, 255), width=2)
+              return img.transpose(Image.FLIP_TOP_BOTTOM)
+
+          ENTEROS = ("SInt8", "UInt8", "short", "SInt16", "unsigned short",
+                     "UInt16", "int", "SInt32", "unsigned int", "UInt32",
+                     "long long", "SInt64", "unsigned long long", "UInt64",
+                     "FileSize", "Type*")
+
+          VALUES = {
+              "m_Name": "levi_holo",
+              "m_ForcedFallbackFormat": 4,
+              "m_DownscaleFallback": False,
+              "m_IsAlphaChannelOptional": False,
+              "m_Width": 512,
+              "m_Height": 512,
+              "m_TextureFormat": 4,
+              "m_MipCount": 1,
+              "m_IsReadable": True,
+              "m_MipsStripped": 0,
+              "m_StreamingMipmaps": False,
+              "m_StreamingMipmapsPriority": 0,
+              "m_ImageCount": 1,
+              "m_TextureDimension": 2,
+              "m_LightmapFormat": 0,
+              "m_ColorSpace": 1,
+              "m_FilterMode": 1,
+              "m_Aniso": 1,
+              "m_MipBias": 0.0,
+              "m_WrapMode": 0,
+          }
+
+          def fill(node, d, pixels):
+              for ch in node.m_Children:
+                  nm, ty = ch.m_Name, ch.m_Type
+                  if ty == "TypelessData":
+                      d[nm] = pixels
+                  elif nm in VALUES:
+                      d[nm] = VALUES[nm]
+                  elif ch.m_Children:
+                      d[nm] = {}
+                      fill(ch, d[nm], pixels)
+                  elif ty in ("string", "char"):
+                      d[nm] = ""
+                  elif ty == "bool":
+                      d[nm] = False
+                  elif ty in ("float", "double"):
+                      d[nm] = 0.0
+                  else:
+                      d[nm] = 0
+
+          def norm(node):
+              for n in node.traverse():
+                  for f in ("m_RefTypeHash", "m_TypeFlags", "m_MetaFlag", "m_ByteSize",
+                            "m_Index", "m_Level", "m_Version", "m_TypeStrOffset",
+                            "m_NameStrOffset"):
+                      if hasattr(n, f) and getattr(n, f) is None:
+                          setattr(n, f, 0)
+
+          def main():
+              open(REP, "a", encoding="utf-8").close()
+              raw = build_tex()
+              pixels = raw.tobytes()
+              log("textura", raw.size, "bytes", len(pixels))
+
+              env = UnityPy.load(SRC)
+              sf = None
+              for o in env.objects:
+                  if o.type.name == "Material":
+                      sf = o.assets_file
+                      break
+              if sf is None:
+                  log("sin SerializedFile con materiales")
+                  return 1
+
+              node = get_typetree_node(ClassIDType.Texture2D, sf.version)
+              norm(node)
+              d = {}
+              fill(node, d, pixels)
+              d["m_CompleteImageSize"] = len(pixels)
+              d["image data"] = pixels
+              d["m_StreamData"] = {"path": "", "offset": 0, "size": 0}
+
+              st = copy.copy(sf.types[0])
+              for attr, val in (("class_id", ClassIDType.Texture2D),
+                                ("node", node), ("is_stripped_type", False),
+                                ("script_type_index", -1), ("script_id", None),
+                                ("type_dependencies", ()),
+                                ("old_type_hash", b"\x00" * 16)):
+                  try:
+                      setattr(st, attr, val)
+                  except Exception:
+                      pass
+              sf.types.append(st)
+              type_id = len(sf.types) - 1
+
+              w = EndianBinaryWriter(endian=sf.reader.endian)
+              TypeTreeHelper.write_typetree(d, node, w, sf)
+              blob = w.bytes
+              log("blob texture", len(blob), "type_id", type_id)
+
+              new_id = max(sf.objects.keys()) + 1
+              obj = ObjectReader(sf, sf.reader, new_id, type_id, st,
+                                 ClassIDType.Texture2D, ClassIDType.Texture2D,
+                                 0, len(blob), None, None, blob)
+              sf.objects[new_id] = obj
+              log("path_id nuevo", new_id)
+
+              hechos = 0
+              for o in list(env.objects):
+                  if o.type.name != "Material":
+                      continue
+                  t = tree_of(o)
+                  if not t:
+                      continue
+                  sp = t.get("m_SavedProperties") or {}
+                  for e in sp.get("m_TexEnvs") or []:
+                      if e.get("first") in ("_Tex", "_DisTex", "_Mask", "_EmissTex"):
+                          e["second"]["m_Texture"]["m_PathID"] = new_id
+                          e["second"]["m_Texture"]["m_FileID"] = 0
+                          e["second"]["m_Scale"] = {"x": 1.0, "y": 1.0}
+                          e["second"]["m_Offset"] = {"x": 0.0, "y": 0.0}
+                  for e in sp.get("m_Colors") or []:
+                      if e.get("first") in ("_Color", "_Color_Tex", "_EdgeColor"):
+                          e["second"] = {"r": 1.0, "g": 1.0, "b": 1.0, "a": 1.0}
+                  o.save_typetree(t)
+                  hechos += 1
+              log("materiales parcheados", hechos)
+
+              f = list(env.files.values())[0]
+              data = f.save(packer="original")
+              open(OUT, "wb").write(data)
+              log("bundle nuevo", len(data), "B")
+              return 0
+
+          try:
+              raise SystemExit(main())
+          except SystemExit:
+              raise
+          except Exception:
+              log("FALLO")
+              log(traceback.format_exc())
+              raise SystemExit(1)
+          PY
+
+      - name: Verificar
+        run: |
+          python - <<'EOF'
+          import glob
+          import UnityPy
+
+          def tree_of(o):
+              t = o.read_typetree()
+              if isinstance(t, tuple):
+                  t = t[0]
+              return t if isinstance(t, dict) else None
+
+          def par(e):
+              if isinstance(e, tuple) and len(e) == 2:
+                  return e[0], e[1]
+              if isinstance(e, dict):
+                  return e.get("first"), e.get("second")
+              return None, None
+
+          p = "work/holo_new.bundle"
+          env = UnityPy.load(p)
+          tex = [o for o in env.objects if o.type.name == "Texture2D"]
+          print("Texture2D:", len(tex))
+          for o in tex:
+              t = tree_of(o)
+              print(" ", t.get("m_Name"), t.get("m_Width"), t.get("m_Height"),
+                    t.get("m_TextureFormat"), len(t.get("image data") or b""))
+          for o in env.objects:
+              if o.type.name == "Material":
+                  for e in (tree_of(o).get("m_SavedProperties") or {}).get("m_TexEnvs") or []:
+                      nm, sec = par(e)
+                      print(" slot", nm, "->", (sec or {}).get("m_Texture", {}).get("m_PathID"))
+          print("bytes", len(open(p, "rb").read()))
+          EOF
+
+      - name: Empaquetar
+        env:
+          P3105: "Levi-externas-veex-6393*#%"
+        run: |
+          python - <<'PY'
+          import copy, hashlib, os, plistlib
+          from cryptography.hazmat.primitives import hashes
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+          MAGIC = b"3105PATCH\x00"
+          PW = os.environ["P3105"].encode()
+          raw = open("patches/holo_personaje.3105", "rb").read()
+          env = plistlib.loads(raw[len(MAGIC):])
+          aadv = env.get("keyAADVersion", env["schemaVersion"])
+          iters = int(env["kdfIterations"])
+          pkg_orig = env["packageID"]
+
+          pl_orig = plistlib.loads(open("work/payload.bplist", "rb").read())
+          nuevo = open("work/holo_new.bundle", "rb").read()
+
+          def seal(k, data, aad):
+              n = os.urandom(12)
+              return n + AESGCM(k).encrypt(n, data, aad)
+
+          def build(pl, pkg, protegido, nombre):
+              ck = os.urandom(32)
+              salt = os.urandom(16)
+              env2 = {
+                  "schemaVersion": env["schemaVersion"],
+                  "keyAADVersion": aadv,
+                  "packageID": pkg,
+                  "kdfSalt": salt,
+                  "kdfIterations": iters,
+                  "keyFingerprint": hashlib.sha256(ck).digest(),
+              }
+              if protegido:
+                  kek = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32,
+                                   salt=salt, iterations=iters).derive(PW)
+                  env2["isPasswordProtected"] = True
+                  env2["wrappedContentKey"] = seal(
+                      kek, ck, f"3105PATCH/v{aadv}/key/{pkg}".encode())
+              else:
+                  env2["isPasswordProtected"] = False
+                  env2["publicContentKey"] = ck
+              env2["encryptedPayload"] = seal(
+                  ck, plistlib.dumps(pl, fmt=plistlib.FMT_BINARY),
+                  f"3105PATCH/v{aadv}/payload/{pkg}".encode())
+              out = MAGIC + plistlib.dumps(env2, fmt=plistlib.FMT_BINARY)
+              open(nombre, "wb").write(out)
+              print(nombre, len(out), "B")
+
+          pl_mod = copy.deepcopy(pl_orig)
+          hits = []
+          def collect(node, holder=None, key=None):
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      collect(v, node, k)
+              elif isinstance(node, list):
+                  for i, v in enumerate(node):
+                      collect(v, node, i)
+              elif isinstance(node, (bytes, bytearray)) and len(node) > 64:
+                  hits.append((holder, key, len(node)))
+          collect(pl_mod)
+          holder, key, tam = max(hits, key=lambda h: h[2])
+          rid = holder.get("id") if isinstance(holder, dict) else None
+          print("blob", tam, "->", len(nuevo), "regla", rid)
+          holder[key] = nuevo
+
+          rd = pl_mod.get("replacementDigests")
+          if rid and isinstance(rd, dict) and rid in rd:
+              rd[rid] = hashlib.sha256(nuevo).digest()
+              print("digest recalculado")
+          else:
+              print("OJO sin digest para la regla")
+
+          build(pl_orig, pkg_orig, True, "control_original.3105")
+          build(pl_mod, pkg_orig, True, "control_mismo_pkgid.3105")
+          build(pl_mod, os.urandom(8).hex().upper(), False, "holo_personaje_LEVI.3105")
+          PY
+
+      - name: Verificar paquete
+        env:
+          P3105: "Levi-externas-veex-6393*#%"
+        run: |
+          python - <<'EOF'
+          import hashlib, os, plistlib, subprocess, sys
+
+          for f in ("control_original.3105", "control_mismo_pkgid.3105",
+                    "holo_personaje_LEVI.3105"):
+              print("===", f)
+              d = "verif_" + f.replace(".3105", "")
+              r = subprocess.run([sys.executable, "tools/decrypt3105.py", f, d],
+                                 capture_output=True, text=True)
+              print((r.stdout or r.stderr).strip()[-400:])
+              if r.returncode:
+                  print("  -> rechazado")
+                  continue
+              pl = plistlib.loads(open(os.path.join(d, "payload.bplist"), "rb").read())
+              rd = pl.get("replacementDigests") or {}
+              malos = 0
+              for rule in (pl.get("project") or {}).get("rules") or []:
+                  rid = rule.get("id")
+                  data = rule.get("replacementData")
+                  if rid in rd and isinstance(data, (bytes, bytearray)):
+                      if hashlib.sha256(data).digest() != rd[rid]:
+                          malos += 1
+                          print("  digest DESAJUSTADO", rid)
+              print("  digests malos:", malos, "reglas:", len(rd))
+          EOF
+
+      - name: Subir
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: holo-levi
+          path: |
+            control_original.3105
+            control_mismo_pkgid.3105
+            holo_personaje_LEVI.3105
+            work/holo_new.bundle
+            report.txt
