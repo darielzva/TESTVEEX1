@@ -1,12 +1,11 @@
 //
 //  ContentView.swift
-//  VEEX EXTERNAL
+//  CRACKED BY @DIDIERXIT7
 //
 
 import SwiftUI
 import UIKit
 import AVFoundation
-import CryptoKit
 
 // MARK: - Error
 enum VexxError: LocalizedError, CustomStringConvertible {
@@ -87,138 +86,6 @@ enum VexxTheme {
     static var dim: Color { Color.white.opacity(0.42) }
 }
 
-// MARK: - Licencia
-@MainActor
-final class VexxLicense: ObservableObject {
-    static let masters: Set<String> = ["VEEX-LEVI-2004", "VEEX-LEVI-FF26"]
-    private static let secret = "veex-externas-levi-2026"
-    private static let alpha = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-    private static let kKey = "veex.key"
-    private static let kDev = "veex.devices"
-
-    @Published var valid = false
-    @Published var master = false
-    @Published var expiry: Date?
-    @Published var message: String?
-
-    init() {
-        if let saved = UserDefaults.standard.string(forKey: Self.kKey) {
-            _ = activate(saved, silent: true)
-        }
-    }
-
-    var idfv: String { UIDevice.current.identifierForVendor?.uuidString ?? "sin-id" }
-
-    private func tag() -> [UInt8] {
-        let h = SHA256.hash(data: Data((idfv + Self.secret).utf8))
-        return Array(h).prefix(4).map { $0 }
-    }
-
-    private static func unb32(_ s: String) -> [UInt8]? {
-        var out: [UInt8] = []
-        var buffer = 0
-        var bits = 0
-        for ch in s.uppercased() {
-            guard let i = alpha.firstIndex(of: ch) else { return nil }
-            buffer = (buffer << 5) | i
-            bits += 5
-            if bits >= 8 {
-                out.append(UInt8((buffer >> (bits - 8)) & 0xFF))
-                bits -= 8
-            }
-        }
-        return out
-    }
-
-    @discardableResult
-    func activate(_ raw: String, silent: Bool = false) -> Bool {
-        let key = raw.uppercased()
-            .replacingOccurrences(of: " ", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        message = nil
-
-        if Self.masters.contains(key) {
-            master = true
-            valid = true
-            expiry = nil
-            UserDefaults.standard.set(key, forKey: Self.kKey)
-            return true
-        }
-
-        let parts = key.split(separator: "-")
-        guard parts.count == 3,
-              parts[0] == "VEEX",
-              let payload = Self.unb32(String(parts[1])), payload.count == 7,
-              let sig = Self.unb32(String(parts[2])), sig.count >= 5 else {
-            if !silent { message = "key inválida" }
-            return false
-        }
-
-        let mac = HMAC<SHA256>.authenticationCode(
-            for: Data(payload),
-            using: SymmetricKey(data: Data(Self.secret.utf8))
-        )
-        guard Array(mac).prefix(5).elementsEqual(sig.prefix(5)) else {
-            if !silent { message = "key inválida" }
-            return false
-        }
-
-        let days = Int(payload[0]) << 8 | Int(payload[1])
-        let date = Calendar.current.date(
-            byAdding: .day,
-            value: days,
-            to: Date(timeIntervalSince1970: 1_577_836_800)
-        ) ?? Date()
-        guard date > Date() else {
-            if !silent { message = "key vencida" }
-            return false
-        }
-
-        if payload[2] & 1 == 1, !Array(payload[3...6]).elementsEqual(tag()) {
-            if !silent { message = "key de otro dispositivo" }
-            return false
-        }
-
-        var devs = UserDefaults.standard.dictionary(forKey: Self.kDev) as? [String: [String]] ?? [:]
-        var list = devs[key] ?? []
-        if !list.contains(idfv) {
-            if payload[2] & 2 == 0, list.count >= 1 {
-                if !silent { message = "key en uso en otro dispositivo" }
-                return false
-            }
-            list.append(idfv)
-            devs[key] = list
-            UserDefaults.standard.set(devs, forKey: Self.kDev)
-        }
-
-        master = false
-        valid = true
-        expiry = date
-        UserDefaults.standard.set(key, forKey: Self.kKey)
-        return true
-    }
-
-    func forget() {
-        valid = false
-        master = false
-        expiry = nil
-        UserDefaults.standard.removeObject(forKey: Self.kKey)
-    }
-
-    var remaining: String {
-        if master { return "Permanente" }
-        guard let expiry else { return "—" }
-        let days = max(0, Calendar.current.dateComponents([.day], from: Date(), to: expiry).day ?? 0)
-        return days == 0 ? "Vence hoy" : "\(days) días"
-    }
-
-    var devices: Int {
-        let devs = UserDefaults.standard.dictionary(forKey: Self.kDev) as? [String: [String]] ?? [:]
-        let key = UserDefaults.standard.string(forKey: Self.kKey) ?? ""
-        return (devs[key] ?? []).count
-    }
-}
-
 enum VexxSupport {
     static var isSupported: Bool {
         let major = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
@@ -230,152 +97,15 @@ enum VexxSupport {
 
 // MARK: - Raíz
 struct ContentView: View {
-    @StateObject private var license = VexxLicense()
-    @State private var input = ""
-
     var body: some View {
-        Group {
-            if license.valid {
-                VexxMain(license: license)
-            } else {
-                VexxGate(input: $input, license: license)
-            }
-        }
-        .preferredColorScheme(.dark)
-    }
-}
-
-// MARK: - Gate
-struct VexxGate: View {
-    @Binding var input: String
-    @ObservedObject var license: VexxLicense
-    @State private var appeared = false
-
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-
-            RadialGradient(
-                colors: [.white.opacity(0.10), .clear],
-                center: .top,
-                startRadius: 40,
-                endRadius: 420
-            )
-            .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                Spacer().frame(height: 70)
-
-                Text("VEEX")
-                    .font(.system(size: 76, weight: .black))
-                    .tracking(10)
-                    .foregroundStyle(VexxTheme.metal)
-                    .shadow(color: .white.opacity(0.30), radius: 26)
-                    .scaleEffect(appeared ? 1 : 0.9)
-                    .opacity(appeared ? 1 : 0)
-
-                Text("BY LEVI")
-                    .font(.system(size: 13, weight: .semibold))
-                    .tracking(9)
-                    .foregroundStyle(VexxTheme.dim)
-                    .padding(.top, 14)
-                    .opacity(appeared ? 1 : 0)
-
-                Spacer().frame(height: 54)
-
-                HStack(spacing: 11) {
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 15))
-                        .foregroundStyle(VexxTheme.dim)
-                    TextField("VEEX-XXXX-XXX", text: $input)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                        .font(.system(size: 17, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white)
-                }
-                .padding(.horizontal, 22)
-                .padding(.vertical, 22)
-                .background(VexxTheme.card, in: RoundedRectangle(cornerRadius: 24))
-                .overlay(RoundedRectangle(cornerRadius: 24).stroke(VexxTheme.stroke))
-                .padding(.horizontal, 26)
-
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(VexxSupport.isSupported ? .green : .red)
-                        .frame(width: 7, height: 7)
-                    Text("iOS \(UIDevice.current.systemVersion) \(VexxSupport.isSupported ? "soportado" : "no soportado")")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.62))
-                }
-                .padding(.top, 16)
-
-                if let m = license.message {
-                    Text(m)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.red)
-                        .padding(.top, 10)
-                }
-
-                Button {
-                    if license.activate(input) { VexxAudio.shared.play("on") }
-                } label: {
-                    Text("Continuar")
-                        .font(.system(size: 20, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 24)
-                        .background(Color.white, in: RoundedRectangle(cornerRadius: 28))
-                        .foregroundStyle(.black)
-                        .shadow(color: .white.opacity(0.35), radius: 24, y: 8)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 26)
-                .padding(.top, 26)
-                .scaleEffect(appeared ? 1 : 0.96)
-                .opacity(appeared ? 1 : 0)
-
-                Spacer()
-
-                VStack(spacing: 10) {
-                    Text("SOPORTADO")
-                        .font(.system(size: 11, weight: .semibold))
-                        .tracking(5)
-                        .foregroundStyle(VexxTheme.dim)
-                    Text(VexxSupport.ranges)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(VexxTheme.dim)
-                        .multilineTextAlignment(.center)
-
-                    HStack(spacing: 26) {
-                        Link(destination: URL(string: "https://t.me/levibrouh")!) {
-                            HStack(spacing: 7) {
-                                Image(systemName: "paperplane.fill")
-                                Text("levibrouh")
-                            }
-                        }
-                        Link(destination: URL(string: "https://t.me/levibrouhs")!) {
-                            HStack(spacing: 7) {
-                                Image(systemName: "megaphone.fill")
-                                Text("Canal")
-                            }
-                        }
-                    }
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.88))
-                    .padding(.top, 14)
-                }
-                .padding(.bottom, 30)
-            }
-        }
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.7)) { appeared = true }
-        }
+        VexxMain()
+            .preferredColorScheme(.dark)
     }
 }
 
 // MARK: - Principal
 struct VexxMain: View {
     @EnvironmentObject private var store: PatchProjectStore
-    @ObservedObject var license: VexxLicense
 
     @State private var tab: VexxTab = .aimbots
     @State private var on: Set<String> = []
@@ -452,16 +182,16 @@ struct VexxMain: View {
                 }
             }
             .task { sync() }
-            .sheet(isPresented: $showSettings) { VexxSettings(license: license) }
+            .sheet(isPresented: $showSettings) { VexxSettings() }
         }
     }
 
     private var header: some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("VEEX EXTERNAL")
-                    .font(.system(size: 19, weight: .black))
-                    .tracking(2)
+                Text("cracked by @didierxit7")
+                    .font(.system(size: 17, weight: .black))
+                    .tracking(1.5)
                     .foregroundStyle(VexxTheme.metal)
                     .shadow(color: .white.opacity(0.22), radius: 10)
                 HStack(spacing: 5) {
@@ -732,7 +462,6 @@ struct VexxMain: View {
 // MARK: - Ajustes
 struct VexxSettings: View {
     @Environment(\.dismiss) private var dismiss
-    @ObservedObject var license: VexxLicense
 
     var body: some View {
         NavigationStack {
@@ -741,31 +470,22 @@ struct VexxSettings: View {
                 List {
                     Section {
                         LabeledContent("Estado") {
-                            Text(license.master ? "Permanente" : license.remaining)
-                                .foregroundStyle(license.master ? .green : .white)
-                        }
-                        LabeledContent("Dispositivos") {
-                            Text(license.master ? "Ilimitados" : "\(license.devices)")
+                            Text("Bypassed")
+                                .foregroundStyle(.green)
                         }
                         LabeledContent("iOS") {
                             Text(ProcessInfo.processInfo.operatingSystemVersionString)
                         }
                     } header: {
-                        Text("Licencia")
+                        Text("Información")
                     }
 
                     Section {
-                        Link("Telegram", destination: URL(string: "https://t.me/levibrouh")!)
-                        Link("Canal", destination: URL(string: "https://t.me/levibrouhs")!)
+                        Text(VexxSupport.ranges)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     } header: {
-                        Text("Levi")
-                    }
-
-                    Section {
-                        Button("Borrar key", role: .destructive) {
-                            license.forget()
-                            dismiss()
-                        }
+                        Text("Soportado")
                     }
                 }
                 .scrollContentBackground(.hidden)
